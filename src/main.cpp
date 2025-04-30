@@ -1,8 +1,12 @@
-#include <Arduino.h>
+#include "Fichier.h"
 #include <SPI.h>
 #include "SPIFFS.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WiFi.h>
+#include "webFeelPix.h"
 
 /**
  * @file main.cpp
@@ -30,57 +34,38 @@
  * - Alimentation autonome à terme (batterie)
  */
 
- /**
- * @brief Déclaration des PIN
- */
-#define PIN_SCK 18 // clock
-#define PIN_SDA 23 // data
-#define PIN_RES 4 // reset
-#define PIN_RS 2 // command
-#define PIN_CS 5// chip select
+// --- Déclaration des PIN ---
+#define PIN_SCK      18  // clock
+#define PIN_SDA      23  // data
+#define PIN_RES      4   // reset
+#define PIN_RS       2   // command
+#define PIN_CS       5   // chip select
 
-#define PIN_BOUTON_BLEU 12
-#define PIN_BOUTON_VERT 14
+#define PIN_BOUTON_BLEU  12
+#define PIN_BOUTON_VERT  14
 #define PIN_BOUTON_ROUGE 27
 
 // Codes pour switch/case
-#define BTN_NONE 0
-#define BTN_BLEU 1
-#define BTN_VERT 2
-#define BTN_ROUGE 3
+#define BTN_NONE   0
+#define BTN_BLEU   1
+#define BTN_VERT   2
+#define BTN_ROUGE  3
 
-// Exemple : smiley 16x16 avec jaune pour les pixels utiles
-#define SMILEY_WIDTH 16
-#define SMILEY_HEIGHT 16
+#define SMILEY_WIDTH   16
+#define SMILEY_HEIGHT  16
+#define WIDTH_SCREEN   128
+#define HEIGHT_SCREEN  160
 
-#define WIDTH_SCREEN 128
-#define HEIGHT_SCREEN 160
+#define TIME_INIT_DISPLAY 5000//duree d'affichage du message à l'initialisation 
 
-#define MAX_FICHIERS 10 // nomnre de fichier limite lisibles
 
-/**
- * @brief Déclaration des variables et constantes
- */
+// --- Déclaration des variables et constantes ---
 Adafruit_ST7735 tft(PIN_CS, PIN_RS, PIN_RES);
-/**
- * @brief On créé une structure qui va associer le code du fichier smiley lu à une couleur interprétable par l'écran
- */
 
- struct PixelMapping {
+struct PixelMapping {
   char symbole;
   uint16_t couleur;
 };
-
-/**
- * @brief Structure qui va s'initialiser avec le nombre de fichiers qui contiennent des informations a afficher sur l'ecran et un tableau avec ces noms, le nombre est limite a 10 fichiers
- * les fichiers lisibles commencent par lire_
- */
-struct FichiersLisibles {
-  int nbFichiers = 0;
-  String noms[MAX_FICHIERS];
-};
-
-FichiersLisibles fichiers;
 
 PixelMapping correspondance[] = {
   {'.', ST77XX_BLACK},
@@ -91,37 +76,121 @@ PixelMapping correspondance[] = {
   {'G', ST77XX_GREEN},
 };
 
-int fichierCourant=0; // numéro du fichier courant affiche
-
-volatile uint8_t dernierAppui = BTN_NONE;  // indique la dernière touche appuyée
-
-const int nbSymboles = sizeof(correspondance) / sizeof(PixelMapping);
-
-unsigned long lastDebounce = 0;
+volatile uint8_t dernierAppui = BTN_NONE;
 const unsigned long DEBOUNCE_MS = 50;
+unsigned long lastDebounce = 0;
 
-/**
- *  prototype des fonctions 
- */
+FichiersLisibles fichiers;  // défini extern
+
+// ** Nom unique de l'ESP **
+String espName;                   // ex "ESP789B"
+
+bool wifiEnabled = true;
+
+// --- Prototypes ---
 uint16_t getCouleur(char c);
-int calculerEchellePixel(const String& ligneTexte, int largeurEcran);
-void lireFichierEtAfficher(const char* nomFichier);
-void afficherLigneSmiley(const String& ligneTexte, int ligneIndex, int pixelSize, int offsetY);
+int calculerEchellePixel(const String& ligne, int largeur);
+void afficherLigneSmiley(const String& ligne, int idx, int taillePixel, int offsetY);
 void recenserFichiersLisibles();
+void lireFichierEtAfficher(const char* nomFichier);  // <— ajouté !
 void IRAM_ATTR boutonBleuAppuye();
 void IRAM_ATTR boutonVertAppuye();
 void IRAM_ATTR boutonRougeAppuye();
 
+int fichierCourant = 0;
+AsyncWebServer server(80);
+TaskHandle_t webTaskHandle = NULL;
+TaskHandle_t mainTaskHandle = NULL;
+
+void webTask(void* pv) {
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+void mainTask(void* pv) {
+  Serial.println(">> mainTask START");
+  TickType_t lastWake = xTaskGetTickCount();
+  const TickType_t period = pdMS_TO_TICKS(200);
+  while (true) {
+    if (dernierAppui != BTN_NONE && millis() - lastDebounce > DEBOUNCE_MS) {
+      lastDebounce = millis();
+      switch (dernierAppui) {
+        case BTN_BLEU:
+          fichierCourant = (fichierCourant + 1) % fichiers.nbFichiers;
+          break;
+        case BTN_VERT:
+          fichierCourant = (fichierCourant + fichiers.nbFichiers - 1) % fichiers.nbFichiers;
+          break;
+        case BTN_ROUGE:
+        wifiEnabled = !wifiEnabled;
+        if (wifiEnabled) {
+          WiFi.mode(WIFI_AP);
+          WiFi.softAP(espName, MDP_WIFI);
+          delay(200);
+          tft.fillScreen(ST77XX_BLACK);
+          tft.setTextSize(2);
+          tft.setTextColor(ST77XX_WHITE);
+          tft.setCursor(0, HEIGHT_SCREEN/2 - 8);
+          tft.print("WiFi ON");
+          tft.setTextSize(1);
+          tft.setCursor(0, HEIGHT_SCREEN/2 + 8);
+          tft.print(WiFi.softAPIP().toString());
+          tft.setTextSize(2);
+        } else {
+          WiFi.softAPdisconnect(true);
+          tft.fillScreen(ST77XX_BLACK);
+          tft.setTextSize(2);
+          tft.setTextColor(ST77XX_WHITE);
+          tft.setCursor(0, HEIGHT_SCREEN/2);
+          tft.print("WiFi OFF");
+        }
+        delay(TIME_INIT_DISPLAY);
+      }
+      lireFichierEtAfficher(fichiers.noms[fichierCourant].c_str());
+      dernierAppui = BTN_NONE;
+    }
+    vTaskDelayUntil(&lastWake, period);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("setup");
+  Serial.setDebugOutput(true);
+  esp_log_level_set("*", ESP_LOG_VERBOSE);
 
-  //initialisation de l'ecran en noir, orientation protrait
-  tft.initR(INITR_BLACKTAB);  
+  // Initialisation écran
+  tft.initR(INITR_BLACKTAB);
   tft.setRotation(0);
   tft.fillScreen(ST77XX_BLACK);
 
-  //initialisation des boutons
+    // 1) Démarre un AP temporaire (avec un SSID par défaut)
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("tmpSSID", MDP_WIFI);
+    delay(100);
+  
+    // 2) Lis la MAC AP
+    String apMac = WiFi.softAPmacAddress();  // maintenant valide
+    apMac.replace(":", "");
+    String tail = apMac.substring(apMac.length() - 6);
+    espName = "ESP_" + tail;
+  
+    // 3) Redémarre l’AP avec le SSID définitif
+    WiFi.softAPdisconnect(true);
+    delay(50);
+    WiFi.softAP(espName.c_str(), MDP_WIFI);
+  
+    // 4) Affiche espName
+    tft.fillScreen(ST77XX_BLACK);
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    int16_t x = (WIDTH_SCREEN - espName.length()*12)/2;
+    if (x < 0) x = 0;
+    tft.setCursor(x, (HEIGHT_SCREEN/2)-12);
+    tft.print(espName);
+    delay(TIME_INIT_DISPLAY);
+
+  // Boutons
   pinMode(PIN_BOUTON_BLEU, INPUT_PULLUP);
   pinMode(PIN_BOUTON_VERT, INPUT_PULLUP);
   pinMode(PIN_BOUTON_ROUGE, INPUT_PULLUP);
@@ -129,90 +198,123 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_BOUTON_VERT), boutonVertAppuye, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_BOUTON_ROUGE), boutonRougeAppuye, FALLING);
 
-  //initialisation de la structure pour les fichiers utilisables
-  if (!SPIFFS.begin(false)) {
-    Serial.println("Échec du montage SPIFFS");
+  // SPIFFS (format if failed)
+  if (!SPIFFS.begin(true)) {
+    Serial.println("Échec du montage SPIFFS (formatage auto)");
     while (1);
-  } else {
-    Serial.println("SPIFFS monté sans formatage");
   }
+
   Serial.println(">> VERSION DEBUG V1.1 <<");
   recenserFichiersLisibles();
   lireFichierEtAfficher(fichiers.noms[fichierCourant].c_str());
+
+  // Routes
+  server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
+  server.on("/list", HTTP_GET, handleList);
+  server.on("/select", HTTP_GET, handleSelect);
+  server.on("/select", HTTP_POST, handleSelect);
+
+server.on("/upload", HTTP_POST,
+  // onRequest – on ne renvoie rien ici
+  [](AsyncWebServerRequest *req) {},
+  // onUpload – appelé pour chaque chunk multipart/form-data
+  handleUpload
+);
+
+// Route de suppression
+server.on("/delete", HTTP_GET, handleDelete);
+
+  server.onNotFound([](AsyncWebServerRequest* req){
+    Serial.printf("404 sur %s\n", req->url().c_str());
+    req->send(404, "text/plain", "Not found");
+  });
+  // Dans setup(), juste avant server.begin():
+server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *req){
+  // Si vous avez un /favicon.ico dans SPIFFS, envoyez-le :
+  if (SPIFFS.exists("/favicon.ico")) {
+    req->send(SPIFFS, "/favicon.ico", "image/x-icon");
+  } else {
+    // Sinon on répond “Pas de contenu” pour couper court au 404
+    req->send(204);
+  }
+});
+
+  server.begin();
+
+  // Tâches RTOS
+  xTaskCreatePinnedToCore(webTask, "WebServer",   8192, NULL, 2, &webTaskHandle, 0);
+  xTaskCreatePinnedToCore(mainTask, "MainLogic", 8192, NULL, 1, &mainTaskHandle, 1);
 }
 
-void IRAM_ATTR boutonBleuAppuye() {
-  dernierAppui  = BTN_BLEU;  
-}
-void IRAM_ATTR boutonVertAppuye() {
-  dernierAppui  = BTN_VERT;  
-}
-void IRAM_ATTR boutonRougeAppuye() {
-  dernierAppui  = BTN_ROUGE;  
-}
-/**
- * @brief repmpli la structire fichiers de la liste des fichiers à afficher
- */
+void IRAM_ATTR boutonBleuAppuye()  { dernierAppui = BTN_BLEU; }
+void IRAM_ATTR boutonVertAppuye()  { dernierAppui = BTN_VERT; }
+void IRAM_ATTR boutonRougeAppuye() { dernierAppui = BTN_ROUGE; }
+
 void recenserFichiersLisibles() {
   Serial.println("recenserFichiersLisibles");
   fichiers.nbFichiers = 0;
 
   File root = SPIFFS.open("/");
-  File fichier = root.openNextFile();
+  File f = root.openNextFile();
 
-  while (fichier && fichiers.nbFichiers < MAX_FICHIERS) {
-    String nom = fichier.name();
+  while (f && fichiers.nbFichiers < MAX_FICHIERS) {
+    String nom = f.name();  // peut rendre "/lire_smileyX.txt" ou "lire_smileyX.txt"
     Serial.println(nom);
-    if (nom.startsWith("lire_")) {
-      fichiers.noms[fichiers.nbFichiers] = "/" +nom;
-      fichiers.nbFichiers++;
+
+    // Normalise : supprime un slash initial éventuel
+    if (nom.startsWith("/")) {
+      nom = nom.substring(1);
     }
-    fichier = root.openNextFile();
+
+    // On ne retient que ceux qui commencent par "lire_"
+    if (nom.startsWith("lire_")) {
+      // On stocke toujours avec un slash initial pour SPIFFS.open()
+      fichiers.noms[fichiers.nbFichiers++] = "/" + nom;
+    }
+
+    f = root.openNextFile();
   }
 
   Serial.print("Nombre de fichiers lisibles : ");
   Serial.println(fichiers.nbFichiers);
 }
 
-/**
- * @brief retourne la valeur associee au symbole lu du fichier pour afficher le pixel sur l'ecran
- * @param c caracture lu
- * @return la valeur de la couleur associee dans PixelMapping
- */
+
 uint16_t getCouleur(char c) {
-  for (int i = 0; i < nbSymboles; i++) {
-      if (correspondance[i].symbole == c) {
-          return correspondance[i].couleur;
-      }
+  for (auto &m : correspondance) {
+    if (m.symbole == c) return m.couleur;
   }
-  return ST77XX_BLACK; // valeur par défaut si non trouvé
+  return ST77XX_BLACK;
 }
 
-/**
- * @brief calcul la taille d'une unite a afficher en fonction du nombre de detail de la premiere ligne
- * @param ligneTexte la ligne du texte
- * @param largeurEcran la largeur de l'ecran en pixel
- * @return la taille que doit prendre chaque detail du smiley sur l'ecran
- */
-int calculerEchellePixel(const String& ligneTexte, int largeurEcran) {
-  int nbColonnes = ligneTexte.length();
-  if (nbColonnes == 0) return 1;
-  return largeurEcran / nbColonnes;
+int calculerEchellePixel(const String& ligne, int largeur) {
+  int cols = ligne.length();
+  return cols ? (largeur / cols) : 1;
 }
 
-/**
- * @brief affiche le fichier lu a l'ecran
- * @param nomFichier le nom du fichier dans lequel le smiley est enregistre
- */
+void afficherLigneSmiley(const String& ligne, int idx,
+                         int taillePixel, int offsetY) {
+  for (int x = 0; x < ligne.length(); x++) {
+    uint16_t col = getCouleur(ligne[x]);
+    for (int dx = 0; dx < taillePixel; dx++) {
+      for (int dy = 0; dy < taillePixel; dy++) {
+        tft.drawPixel(x*taillePixel + dx,
+                      idx*taillePixel + dy + offsetY,
+                      col);
+      }
+    }
+  }
+}
+
+// --- Implémentation manquante jusqu'ici ---
 void lireFichierEtAfficher(const char* nomFichier) {
   File fichier = SPIFFS.open(nomFichier);
   if (!fichier || fichier.isDirectory()) {
-    Serial.print("Erreur à l'ouverture du fichier : ");
-    Serial.println(nomFichier);
+    Serial.printf("Erreur d'ouverture SPIFFS : %s\n", nomFichier);
     return;
   }
 
-  // --- 1ère passe : lire première ligne + compter les lignes
+  // Première passe : lecture de la 1ère ligne + comptage total
   String ligneTemp = fichier.readStringUntil('\n');
   ligneTemp.trim();
   int pixelSize = calculerEchellePixel(ligneTemp, tft.width());
@@ -223,14 +325,12 @@ void lireFichierEtAfficher(const char* nomFichier) {
     totalLines++;
   }
 
-  // --- calcul de l'offset vertical
+  // Calcul offset vertical
   int totalHeight = totalLines * pixelSize;
   int offsetY = (tft.height() - totalHeight) / 2;
 
-  // --- remise au début pour la 2ème passe
+  // Deuxième passe : réinitialiser et afficher
   fichier.seek(0);
-
-  // --- effacer et afficher toutes les lignes décalées
   tft.fillScreen(ST77XX_BLACK);
   int ligneIndex = 0;
   while (fichier.available()) {
@@ -242,58 +342,4 @@ void lireFichierEtAfficher(const char* nomFichier) {
   fichier.close();
 }
 
-/**
- * @brief affiche ligne par ligne le smiley sur l'ecran
- * @param ligneTexte la ligne en cour de lecture
- * @param ligneIndex le numero de la ligne dans le fichier
- * @param offsetY créer un décalage en hauteur
- * @param pixelSize la taille que fera chaque element de la ligne sur l'ecran
- */
-void afficherLigneSmiley(const String& ligneTexte, int ligneIndex, int pixelSize, int offsetY) {
-  for (int col = 0; col < ligneTexte.length(); col++) {
-    uint16_t couleur = getCouleur(ligneTexte[col]);
-    for (int dx = 0; dx < pixelSize; dx++) {
-      for (int dy = 0; dy < pixelSize; dy++) {
-        int x = col * pixelSize + dx;
-        int y = ligneIndex * pixelSize + dy + offsetY;
-        tft.drawPixel(x, y, couleur);
-      }
-    }
-  }
-}
-
-void loop() {
-
-  // Si une touche a été enregistrée
-  if (dernierAppui != BTN_NONE) {
-    // Debounce simple
-    if (millis() - lastDebounce > DEBOUNCE_MS) {
-      lastDebounce = millis();
-
-      switch (dernierAppui) {
-        case BTN_BLEU:
-          fichierCourant = (fichierCourant + 1) % fichiers.nbFichiers;
-          Serial.println("Suivant → index = " + String(fichierCourant));
-          break;
-
-        case BTN_VERT:
-          fichierCourant = (fichierCourant + fichiers.nbFichiers - 1) % fichiers.nbFichiers;
-          Serial.println("Précédent → index = " + String(fichierCourant));
-          break;
-
-        case BTN_ROUGE:
-          // action “aléatoire”
-          fichierCourant = random(0, fichiers.nbFichiers);
-          Serial.println("Aléatoire → index = " + String(fichierCourant));
-          break;
-      }
-
-      // Affichage hors ISR
-      lireFichierEtAfficher(fichiers.noms[fichierCourant].c_str());
-
-      // Réinitialisation pour le prochain appui
-      dernierAppui = BTN_NONE;
-    }
-  }
-  delay(1000);
-}
+void loop() {}

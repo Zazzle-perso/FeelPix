@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>FeelPix – Galerie</title>
+  <link rel="icon" href="favicon.ico">
+  <style>
+    body { font-family: sans-serif; padding: 1em; }
+    #controls { margin-bottom: 1em; }
+    button { padding: 0.4em 0.8em; margin-right: 0.5em; }
+    #gallery {
+      display: flex; flex-wrap: wrap; gap: 0.5em;
+    }
+    .thumb {
+      display: flex; flex-direction: column; align-items: center;
+      cursor: pointer; border: 2px solid transparent; padding: 0.25em;
+    }
+    .thumb.selected {
+      border-color: #000;
+      box-shadow: 0 0 5px rgba(0,0,0,0.5);
+    }
+    .thumb canvas {
+      image-rendering: pixelated;
+      width: 64px; height: 64px;
+      border: 1px solid #666; background: #000;
+    }
+    .thumb span { margin-top: 0.25em; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+  <h1>FeelPix – Galerie</h1>
+  <div id="controls">
+    <button id="newBtn">✏️ Créer un nouveau smiley</button>
+    <button id="delBtn" disabled>🗑️ Supprimer le smiley sélectionné</button>
+  </div>
+  <div id="gallery">Chargement des smileys…</div>
+
+  <script>
+    const gallery = document.getElementById('gallery');
+    const newBtn  = document.getElementById('newBtn');
+    const delBtn  = document.getElementById('delBtn');
+    let selectedName = null;
+    let selectedElt  = null;
+
+    newBtn.addEventListener('click', () => location.href = 'editor.html');
+    delBtn.addEventListener('click', async () => {
+      if (!selectedName) return;
+      if (!confirm(`Supprimer ${selectedName} définitivement ?`)) return;
+      try {
+        const resp = await fetch(`/delete?file=${encodeURIComponent(selectedName)}`);
+        const j = await resp.json();
+        if (j.ok) {
+          // Retirer la miniature
+          selectedElt.remove();
+          // Réinitialiser l’état
+          selectedName = null;
+          selectedElt  = null;
+          delBtn.disabled = true;
+        } else {
+          alert('Erreur suppression : ' + JSON.stringify(j));
+        }
+      } catch (e) {
+        console.error(e);
+        alert('Impossible de contacter le serveur');
+      }
+    });
+
+    const COLOR_MAP = {
+      '.': '#000000','Y': '#FFFF00','R': '#FF0000',
+      'G': '#00FF00','B': '#0000FF','W': '#FFFFFF'
+    };
+
+    async function loadGallery() {
+      try {
+        const resp = await fetch('/list');
+        const files = await resp.json();  // ["/lire_smiley0.txt", ...]
+        gallery.innerHTML = '';
+        files.forEach(fullPath => {
+          const name = fullPath.startsWith('/') ? fullPath.slice(1) : fullPath;
+          const div  = document.createElement('div');
+          div.className = 'thumb';
+
+          // Canvas 16×16
+          const c = document.createElement('canvas');
+          c.width = 16; c.height = 16;
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0,0,16,16);
+
+          // Charger et dessiner
+          fetch(fullPath)
+            .then(r => r.text())
+            .then(txt => {
+              txt.trim().split('\n').forEach((line,y) => {
+                for (let x=0; x<line.length; x++){
+                  ctx.fillStyle = COLOR_MAP[line[x]] || '#000';
+                  ctx.fillRect(x,y,1,1);
+                }
+              });
+            });
+
+          const label = document.createElement('span');
+          label.textContent = name;
+
+          div.append(c, label);
+          div.addEventListener('click', () => {
+            // Sélection visuelle
+            document.querySelectorAll('.thumb')
+                    .forEach(t => t.classList.remove('selected'));
+            div.classList.add('selected');
+            // Activer suppression
+            selectedName = name;
+            selectedElt  = div;
+            delBtn.disabled = false;
+            // Changer le smiley à l'écran
+            fetch(`/select?file=${encodeURIComponent(name)}`)
+              .catch(console.error);
+          });
+
+          gallery.appendChild(div);
+        });
+        // reset bouton supprimer
+        selectedName = null;
+        selectedElt  = null;
+        delBtn.disabled = true;
+      } catch (e) {
+        gallery.textContent = 'Impossible de charger la galerie.';
+        console.error(e);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', loadGallery);
+  </script>
+</body>
+</html>

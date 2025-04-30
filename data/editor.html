@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>FeelPix – Éditeur</title>
+  <style>
+    body { font-family: sans-serif; padding: 1em; }
+    button { margin: 0.25em; padding: 0.5em 1em; font-size: 1em; }
+    #palette button {
+      width: 24px; height: 24px;
+      margin: 2px;
+      border: 1px solid #666;
+      cursor: pointer;
+    }
+    #palette button.selected {
+      border: 3px solid black;
+    }
+    #editor {
+      display: inline-block;
+      margin-top: 1em;
+    }
+    #pixelCanvas {
+      image-rendering: pixelated;
+      width: 320px;  /* 16× scale 20 */
+      height: 320px;
+      border: 1px solid #333;
+      cursor: crosshair;
+    }
+    #controls { margin-top: 0.5em; }
+  </style>
+</head>
+<body>
+  <h1>Éditeur de Smiley</h1>
+  <button onclick="location.href='index.html'">🔙 Retour à la sélection</button>
+
+  <!-- Palette de couleurs -->
+  <div id="palette">
+    <button data-color="#000000" style="background:#000000"></button>
+    <button data-color="#FFFF00" style="background:#FFFF00"></button>
+    <button data-color="#FF0000" style="background:#FF0000"></button>
+    <button data-color="#00FF00" style="background:#00FF00"></button>
+    <button data-color="#0000FF" style="background:#0000FF"></button>
+    <button data-color="#FFFFFF" style="background:#FFFFFF"></button>
+    <button data-color="eraser">🗑️</button>
+  </div>
+
+  <!-- Zone de dessin -->
+  <div id="editor">
+    <canvas id="pixelCanvas" width="16" height="16"></canvas>
+    <div id="controls">
+      <button id="clearBtn">Effacer</button>
+      <button id="saveBtn">Enregistrer</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas   = document.getElementById('pixelCanvas');
+    const ctx      = canvas.getContext('2d');
+    const palette  = document.getElementById('palette');
+    const clearBtn = document.getElementById('clearBtn');
+    const saveBtn  = document.getElementById('saveBtn');
+
+    let color  = '#000000';
+    let eraser = false;
+
+    // Fond noir initial
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0,0,16,16);
+
+    // Sélection de couleur / gomme
+    palette.addEventListener('click', e => {
+      const btn = e.target;
+      if (!btn.dataset.color) return;
+      eraser = (btn.dataset.color === 'eraser');
+      if (!eraser) color = btn.dataset.color;
+      palette.querySelectorAll('button').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+    });
+
+    // Dessin
+    function draw(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
+      const y = Math.floor((e.clientY - rect.top ) * (canvas.height / rect.height));
+      ctx.fillStyle = eraser ? '#000000' : color;
+      ctx.fillRect(x, y, 1, 1);
+    }
+    canvas.addEventListener('mousedown', draw);
+    canvas.addEventListener('mousemove', e => { if (e.buttons === 1) draw(e); });
+
+    // Effacer tout
+    clearBtn.addEventListener('click', () => {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0,0,16,16);
+    });
+
+    // Enregistrer (multipart/form-data via FormData)
+    saveBtn.addEventListener('click', async () => {
+      // Convertir en texte pixelisé
+      const img = ctx.getImageData(0,0,16,16).data;
+      const map = {
+        '0,0,0':      '.',
+        '255,255,0':  'Y',
+        '255,0,0':    'R',
+        '0,255,0':    'G',
+        '0,0,255':    'B',
+        '255,255,255':'W'
+      };
+      let txt = '';
+      for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 16; x++) {
+          const idx = (y*16 + x)*4;
+          const key = `${img[idx]},${img[idx+1]},${img[idx+2]}`;
+          txt += map[key] || '.';
+        }
+        txt += '\n';
+      }
+
+      try {
+        // Construire un FormData pour multipart/form-data
+        const form = new FormData();
+        form.append('file',
+          new Blob([txt], { type: 'text/plain' }),
+          'smiley.txt'
+        );
+
+        // Envoi sans forcer Content-Type
+        const r = await fetch('/upload', {
+          method: 'POST',
+          body: form
+        });
+
+        if (!r.ok) {
+          const errText = await r.text();
+          throw new Error(errText || `Erreur ${r.status}`);
+        }
+
+        const payload = await r.json();
+        alert('Smiley créé : ' + payload.file);
+      } catch (err) {
+        console.error('Upload échoué :', err);
+        alert('Erreur lors de la création du fichier :\n' + err.message);
+      }
+    });
+  </script>
+</body>
+</html>
